@@ -26,7 +26,7 @@ permissions:
 #   ECR_REPOSITORY_URL = module.ecr.ecr_repository_url
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPOSITORY_URL: ${{ vars.ECR_REPOSITORY_URL }}
+  ECR_REPOSITORY_URL: ${{ secrets.ECR_REPOSITORY_URL }}
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -74,7 +74,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
