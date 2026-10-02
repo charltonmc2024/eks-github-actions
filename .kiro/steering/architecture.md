@@ -4,201 +4,217 @@
 
 Implement only:
 
-`envs/dev`
+`eks-terraform/envs/dev`
 
-Do not create staging or production environments unless explicitly requested.
+Run only the Erudition landing page on Amazon EKS. Do not create staging or
+production environments unless explicitly requested.
+
+Out of scope (do not build): backend API services, DynamoDB, S3 frontend,
+CloudFront, Route 53, ACM, Ingress, or a public load balancer.
+
+---
 
 ## High-Level Request Flow
 
-For DEV, CloudFront is the public entry point on its default
-`*.cloudfront.net` domain. Route 53 and a custom ACM certificate are
-NOT part of the current DEV request flow; they are future
-custom-domain concerns (see Edge Module).
+Initial access is through `kubectl port-forward` — there is no public entry
+point in this scope.
 
-Internet
-   |
-CloudFront   (default *.cloudfront.net domain)
-   |
-   +---- Default behavior ----> S3 Frontend (private, via OAC)
-   |
-   +---- /api/* ----> CloudFront VPC Origin
-                          |
-                     Internal ALB (internal)
-                          |
-                     ECS Fargate (private subnets)
-                          |
-                      DynamoDB
+```text
+Developer workstation
+      |
+      |  kubectl port-forward svc/<service> 8080:80
+      v
+Kubernetes Service (ClusterIP)
+      |
+      v
+Deployment (2 replicas) -- landing page container on port 3000
+      |
+      v
+EKS managed node group (small EC2 nodes in private subnets)
+```
 
-AWS Shield Standard automatically provides baseline DDoS protection
-for supported AWS services such as CloudFront.
+Deployment flow:
 
-No Terraform resource is required for Shield Standard.
+```text
+GitHub Actions runner
+      |
+      |  GitHub OIDC -> assume AWS IAM role (no stored keys)
+      v
+Amazon ECR  <--- docker push (image tagged with Git commit SHA)
+      |
+      v
+EKS API endpoint  <--- kubectl apply / kubectl rollout status
+```
+
+---
+
+## Modules
+
+Four reusable Terraform modules under `eks-terraform/modules/`:
+
+1. `network`
+2. `ecr`
+3. `eks`
+4. `cicd`
+
+Use variables for environment-specific settings. Never hardcode AWS account
+IDs, credentials, or generated resource identifiers.
+
+---
 
 ## Network Module
 
-Location:
-
-`modules/network/`
+Location: `modules/network/`
 
 Responsibilities:
 
 - VPC
-- Public subnets
-- Private subnets
+- Public subnets (for NAT gateway / egress, across two AZs)
+- Private subnets (for EKS nodes, across two AZs)
 - Internet Gateway
-- Route tables
-- Route table associations
-- NAT Gateway when enabled
-- Elastic IP for NAT when required
-- VPC endpoints
-- ALB security group
-- ECS security group
-- VPC endpoint security group
+- Route tables and associations
+- Outbound connectivity for private nodes (see "Node Connectivity" below)
+- Security groups as needed
 
-Application workloads should run in private subnets.
+Application workloads (EKS nodes/pods) run in private subnets and must not
+receive public IP addresses.
 
-## Edge Module
+### Node Connectivity (a design decision, not a default)
 
-Location:
+Private nodes still need outbound access to pull images from ECR, reach the EKS
+control plane, and send logs. Compare these options and choose deliberately —
+document the choice and its cost impact:
 
-`modules/edge/`
+- **NAT gateway** — simplest; private subnets route `0.0.0.0/0` to a NAT
+  gateway in a public subnet. Recurring hourly + per-GB cost (see
+  `conventions.md`). A single NAT gateway (not one per AZ) is the
+  cost-conscious choice for dev.
+- **VPC interface/gateway endpoints** (ECR API, ECR DKR, S3 gateway,
+  CloudWatch Logs, STS, EKS) — avoids a NAT gateway for the AWS-service
+  traffic this project needs; interface endpoints have their own hourly cost
+  but can be cheaper and more private than NAT for a small workload.
+- **Public-subnet nodes with public IPs** — avoids NAT cost but violates the
+  private-by-default and least-privilege goals. Not preferred.
 
-Responsibilities:
+Do not assume a NAT gateway is mandatory. Select the smallest secure option
+that lets private nodes reach ECR and the control plane.
 
-- Private S3 frontend bucket
-- CloudFront distribution
-- Origin Access Control (OAC)
-- CloudFront VPC Origin
+---
 
-The S3 frontend bucket must remain private.
+## ECR Module
 
-CloudFront should access S3 through Origin Access Control.
-
-The CloudFront distribution's default behavior serves the private S3
-frontend; the `/api/*` behavior routes through the edge-owned
-CloudFront VPC Origin to the internal ALB. The edge module consumes
-`alb_arn` and `alb_dns_name` from the backend module to build the VPC
-Origin (no ALB ARN, DNS name, or VPC Origin id is hardcoded).
-
-For DEV, CloudFront uses its default `*.cloudfront.net` domain and the
-default viewer certificate; the edge module creates NO ACM certificate
-and NO Route 53 resources.
-
-ACM and Route 53 are future custom-domain capabilities: a later
-environment may add a custom viewer domain, a Route 53 hosted zone and
-records, and a custom ACM certificate in `us-east-1` (via the
-`aws.us_east_1` provider alias) without redesigning the module. None of
-these are created for DEV.
-
-AWS Shield Standard is automatic and must not be implemented as a
-separate Terraform resource.
-
-## Backend Module
-
-Location:
-
-`modules/backend/`
+Location: `modules/ecr/`
 
 Responsibilities:
 
-- ECR
-- Internal ALB
-- Target groups
-- ALB listener
-- ECS cluster
-- ECS task definition
-- ECS service
-- ECS execution role
-- ECS task role
-- Secrets integration
-- Auto Scaling
-- CloudWatch application log groups
+- One ECR repository for the landing-page image
+- Image lifecycle policy (for example: expire untagged images, keep the last N
+  tagged images) to control storage cost
 
-The backend module does NOT own the CloudFront VPC Origin; that
-resource belongs to the edge module. The backend module exposes
-`alb_arn` and `alb_dns_name` so the edge module can build the
-CloudFront VPC Origin and set the API origin domain. The backend
-module holds no reference to the edge module.
+Expose the repository URL as an output so CI/CD can reference it rather than
+hardcoding it.
 
-ECS tasks should run in private subnets.
+---
 
-ECS tasks should not receive public IP addresses.
+## EKS Module
 
-## Data Module
-
-Location:
-
-`modules/data/`
+Location: `modules/eks/`
 
 Responsibilities:
 
-- DynamoDB
-- DynamoDB indexes
-- KMS where required
-- Backup configuration
-- Schema documentation
+- EKS cluster (control plane)
+- One small managed node group in the private subnets
+- Cluster IAM role and node IAM role (least privilege, AWS-managed EKS policies)
+- Cluster access configuration (EKS access entries) for the operator principal
+
+The node IAM role carries the standard managed policies required for a node to
+join the cluster and pull from ECR. The cluster endpoint access mode (public,
+private, or both) is an explicit, documented choice — see "EKS API Endpoint
+Access" below.
+
+### EKS API Endpoint Access
+
+The GitHub Actions runner (hosted outside the VPC) runs `kubectl` against the
+EKS API endpoint. For the runner to reach it, the cluster endpoint must be
+reachable from the runner. Options, in order of preference for this learning
+scope:
+
+- **Public endpoint (optionally CIDR-restricted)** — simplest for a
+  GitHub-hosted runner. Restrict `public_access_cidrs` where practical.
+- **Public + private endpoint** — nodes use the private path; the runner uses
+  the public path.
+- **Private-only endpoint** — requires a self-hosted runner inside the VPC (or
+  a bastion/VPN). More secure but more setup; note it as a future option.
+
+Document which mode is chosen and why. Authentication uses IAM (the OIDC-assumed
+role); authorization inside the cluster is granted separately (see
+`aws-security.md`).
+
+---
 
 ## CI/CD Module
 
-Location:
-
-`modules/cicd/`
+Location: `modules/cicd/`
 
 Responsibilities:
 
-- Infrastructure required to run Jenkins
-- Jenkins IAM permissions
-- Jenkins networking/security configuration
+- GitHub OIDC identity provider in IAM (federation; no stored AWS keys)
+- Least-privilege IAM role assumable by GitHub Actions, trust policy scoped to
+  the specific repository (and branch/environment where practical)
+- Permissions for ECR login/push and `eks:DescribeCluster`
+- An EKS access entry (and associated access policy or Kubernetes RBAC) that
+  grants the role deployment permissions, scoped to the application namespace
+  where practical
 
-The Jenkins pipeline itself belongs in the repository `Jenkinsfile`.
+The GitHub Actions **workflow definition** lives at `.github/workflows/` in the
+repository, not inside a Terraform module. Terraform provisions the identity and
+permissions the workflow uses.
 
-## Observability Module
+> Important: an EKS access entry by itself does not grant any Kubernetes
+> permissions. It must be paired with an EKS access policy association or
+> Kubernetes RBAC (Role/RoleBinding) to allow the role to deploy. See
+> `aws-security.md`.
 
-Location:
+---
 
-`modules/observability/`
+## Kubernetes Manifests
 
-Responsibilities:
+Location: `k8s/` at the repository root.
 
-- CloudWatch alarms
-- CloudWatch dashboard
-- SNS
-- WAF
-- GuardDuty
-- CloudTrail
-- AWS Config
+- `Deployment` — 2 replicas, resource requests and limits, readiness and
+  liveness probes, references the exact image tag produced by CI (the Git
+  commit SHA), running in a dedicated application namespace where practical.
+- `Service` — `ClusterIP` type; reached initially through `kubectl
+  port-forward`.
+
+Manifests are applied by the GitHub Actions workflow, not by Terraform.
+
+---
 
 ## Dependency Direction
 
-Prefer dependencies in this direction:
-
-network / data
-      |
-      v
-   backend
-      |
-      v
-    edge
-
-The network and data modules are upstream of the backend module; the
-backend module is upstream of the edge module. The edge module
-consumes `alb_arn` and `alb_dns_name` from the backend module. The
-backend module never references the edge module.
-
-cicd
+```text
+network
    |
-   +---- deployment
-
-observability
+   +--> eks  (nodes need the private subnets + connectivity)
    |
-   +---- monitors deployed resources
+ecr  (independent; image registry)
+   |
+cicd (needs the ECR repo and the EKS cluster to grant scoped access)
+```
 
-Avoid circular module dependencies.
+- `network` is upstream of `eks`.
+- `ecr` is independent of the network.
+- `cicd` consumes the ECR repository identifier and the EKS cluster identifiers
+  to build the OIDC role and the scoped EKS access entry.
+
+Pass values between modules through outputs and input variables. Avoid circular
+module dependencies.
+
+---
 
 ## Architecture Principle
 
-Do not change the established architecture merely to introduce
-additional AWS services.
-
-Architecture changes should have a clear security, reliability,
-scalability, maintainability, cost, or product reason.
+Do not change the established architecture merely to introduce additional AWS
+services. Architecture changes should have a clear security, reliability,
+maintainability, cost, or learning reason.

@@ -1,0 +1,56 @@
+# Copy this file to envs/dev/terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit it.
+
+app_name    = "erudition"
+environment = "eks-dev"
+aws_region  = "us-east-1"
+owner       = "platform-learning"
+
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidr1  = "10.0.1.0/24"
+public_subnet_cidr2  = "10.0.3.0/24"
+private_subnet_cidr1 = "10.0.2.0/24"
+private_subnet_cidr2 = "10.0.4.0/24"
+
+# Connectivity for private EKS nodes.
+# For the current dev setup a single NAT Gateway provides outbound egress.
+# Disabling NAT removes that egress — the toggle alone does NOT make private
+# nodes functional; a NAT-free design must supply another working path
+# (e.g. VPC interface endpoints for ECR/STS/Logs plus the S3 gateway endpoint).
+enable_nat_gateway = true
+
+# Optional free S3 gateway endpoint (S3 backs ECR image layers). Off by default;
+# enable to keep S3-bound traffic off the NAT Gateway.
+enable_vpc_endpoints = false
+
+# ECR image registry.
+ecr_repository_suffix          = "landing"
+ecr_untagged_image_expiry_days = 7
+# max_tagged_images is an APPROXIMATE rollback window, not a guaranteed depth:
+# lifecycle expiry counts images (not releases) and can even remove an image a
+# live Deployment still references. Untagged images may also be in use by digest.
+# Size both values generously relative to how far back you might roll back.
+ecr_max_tagged_images = 10
+
+# EKS cluster + node group.
+kubernetes_version = "1.31"
+
+# REQUIRED. Your current public IP as a /32 so local kubectl can reach the EKS
+# public API endpoint. Replace with your own IP; this is only a placeholder.
+# Find it with: curl -s https://checkip.amazonaws.com
+admin_public_cidr = "203.0.113.10/32"
+
+# REQUIRED. Your IAM user/role ARN, granted cluster-admin via an EKS access
+# entry. Replace the account id and principal with your own; placeholder only.
+operator_principal_arn = "arn:aws:iam::000000000000:user/CHANGE_ME"
+
+# Node group sizing (one node initially; room for a rolling-update surge node).
+node_instance_type = "t3.small"
+node_desired_size  = 1
+node_min_size      = 1
+node_max_size      = 2
+
+# CI/CD (GitHub OIDC + IAM role). github_owner/github_repo scope the OIDC trust.
+github_owner  = "charltonmc2024"
+github_repo   = "eks-github-actions"
+github_branch = "main"

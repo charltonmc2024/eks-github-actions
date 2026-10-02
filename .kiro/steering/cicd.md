@@ -1,290 +1,236 @@
-# Jenkins CI/CD Standards
+# GitHub Actions CI/CD Standards
 
 ## CI/CD Platform
 
-Jenkins is the primary CI/CD platform.
+GitHub Actions is the primary CI/CD platform.
 
-Do not introduce AWS CodePipeline, GitHub Actions, or another CI/CD platform unless explicitly requested.
+Do not introduce Jenkins, AWS CodePipeline, or another CI/CD platform unless
+explicitly requested.
 
-Jenkins pipeline behavior belongs in the repository `Jenkinsfile`.
-
-Terraform modules may create infrastructure required by Jenkins, but they must not contain the primary application deployment pipeline.
+Pipeline behavior lives in workflow files under `.github/workflows/` in the
+repository. Terraform modules may create the AWS infrastructure the workflow
+needs (OIDC provider, IAM role, EKS access), but must not contain the pipeline
+definition itself.
 
 ---
 
 ## Current Deployment Target
 
-Jenkins currently targets only:
+The pipeline currently targets only the development environment.
 
-`envs/dev`
+- Terraform working directory: `eks-terraform/envs/dev`
+- Application image: the Erudition landing page
+- Deployment target: the EKS cluster's application namespace
 
-Terraform working directory:
-
-`ecs-terraform/envs/dev`
-
-Do not implement staging or production pipeline stages unless explicitly requested.
-
-Future staging and production pipelines may introduce additional approval, security, testing, and deployment controls without changing the fundamental module architecture.
+Do not implement staging or production pipeline stages unless explicitly
+requested.
 
 ---
 
-## Jenkinsfile
+## Workflow Location
 
-The main pipeline definition belongs at the repository root:
+Workflow definitions belong at:
 
-`Jenkinsfile`
+`.github/workflows/`
 
-Do not place the primary Jenkinsfile inside a Terraform module.
-
-Keep pipeline logic understandable and avoid unnecessary duplication.
-
-Use scripts or reusable pipeline components only when they provide a clear maintainability benefit.
+Keep workflow logic understandable and avoid unnecessary duplication. Use
+reusable steps or composite actions only when they provide a clear
+maintainability benefit.
 
 ---
 
 ## Pipeline Flow
 
-The intended high-level flow is:
+The intended high-level flow:
 
 ```text
-Git
+GitHub (push / PR / manual dispatch)
  |
-Jenkins
+ +-- Checkout
  |
- +-- Application Tests
+ +-- Validate & build landing page (install deps, lint if configured, next build)
  |
- +-- Terraform Checks
+ +-- Build Docker image + smoke test (run container, curl the page)
  |
- +-- Docker Build
+ +-- Authenticate to AWS via OIDC (no stored access keys)
  |
- +-- ECR Push
+ +-- Push image to ECR (tagged with the Git commit SHA)
  |
- +-- ECS Deployment
+ +-- Deploy to EKS (kubectl apply / set image in the app namespace)
  |
- +-- Deployment Verification
+ +-- Check rollout success (kubectl rollout status)
 ```
 
-A failure in a required stage must prevent dependent deployment stages from continuing.
+A failure in any required stage must prevent dependent deployment stages from
+continuing.
 
 ---
 
-## Terraform Pipeline
+## Application Build Stage
 
-Run appropriate Terraform quality and planning checks including:
+For the Next.js landing page:
 
-```bash
-terraform fmt -check -recursive
-terraform init
-terraform validate
-terraform plan
-```
+1. Install dependencies (`npm ci`).
+2. Run linting where configured (`npm run lint`).
+3. Build the application (`npm run build`).
+4. Fail the pipeline if a required check fails.
 
-Terraform formatting, initialization, validation, or planning failures must fail the appropriate pipeline execution.
-
-Do not automatically run `terraform apply` merely because `terraform plan` succeeds.
-
-Infrastructure changes require an intentional deployment control.
-
-For the current DEV workflow, infrastructure planning and application deployment should remain logically distinguishable.
-
-Future staging and production environments may require stronger approval gates before infrastructure changes are applied.
+Do not invent test commands that are not defined in `package.json`. Inspect the
+application configuration first. The current `package.json` defines `dev`,
+`build`, `start`, and `lint` (no test script); do not call a non-existent
+`npm test`.
 
 ---
 
-## Terraform State
+## Docker Image + Smoke Test
 
-Use the configured remote Terraform backend for environment state.
+Build the image from the repository `Dockerfile` (a multi-stage Next.js
+standalone build that runs as a non-root user on port 3000). Treat it as a
+reusable starting point and verify its build and runtime behavior.
 
-Do not create or maintain separate local state as part of the Jenkins deployment workflow.
+Smoke test before pushing: run the built image and confirm the landing page
+responds (for example `curl -f http://localhost:3000/`). Do not push or deploy
+an image that fails the smoke test.
 
-Do not commit:
-
-- `terraform.tfstate`
-- `terraform.tfstate.backup`
-- saved Terraform plan files
-- `.terraform/`
-
-Jenkins must use the correct backend and environment before running Terraform operations.
+Tag images with the immutable **Git commit SHA**. `latest` may be an optional
+convenience tag but must not be the version the deployment relies on.
 
 ---
 
-## Application Pipeline
+## AWS Authentication (OIDC)
 
-Typical application deployment stages are:
+Authenticate using GitHub OIDC federation — never stored AWS access keys.
 
-1. Checkout source
-2. Install dependencies
-3. Run tests
-4. Build application
-5. Build Docker image
-6. Authenticate to ECR
-7. Tag Docker image with an immutable identifier
-8. Push Docker image to ECR
-9. Deploy the intended image version to ECS
-10. Verify deployment
-
-Do not deploy an application image if required tests or build stages fail.
-
----
-
-## Docker Images
-
-Prefer immutable image tags.
-
-Examples:
-
-- Git commit SHA
-- Jenkins build number
-
-Do not rely exclusively on:
-
-`latest`
-
-for controlled deployments.
-
-The deployed ECS task definition should identify the intended application image version.
-
-Using `latest` as an optional convenience tag is acceptable only when deployment does not depend on it for version identification.
-
----
-
-## Credentials
-
-Never hardcode AWS credentials in the Jenkinsfile, Terraform configuration, Dockerfiles, or application source.
-
-Prefer:
-
-- IAM roles where possible
-- Jenkins Credentials where required
-- AWS Secrets Manager where appropriate
-
-Use least-privilege permissions for Jenkins.
-
-Do not grant Jenkins `AdministratorAccess` merely to simplify deployment.
-
-Do not expose credentials or secret values in pipeline logs.
+- Use `aws-actions/configure-aws-credentials` with `role-to-assume` pointing at
+  the IAM role created by the `cicd` Terraform module.
+- The role's trust policy restricts which repository (and branch/environment
+  where practical) may assume it.
+- Grant the role least privilege: ECR auth + push/pull, and
+  `eks:DescribeCluster`.
 
 ---
 
 ## ECR
 
-Jenkins may:
-
-- authenticate to ECR
-- build the application image
-- tag the image
-- push the image
-
-Use the ECR repository created and managed by the appropriate Terraform module.
-
-Do not hardcode ECR repository URLs when they can be obtained from Terraform outputs, AWS APIs, environment configuration, or other established project interfaces.
+The workflow may authenticate to ECR, build, tag, and push the image. Use the
+ECR repository created by the `ecr` Terraform module. Do not hardcode the ECR
+repository URL — obtain it from a Terraform output, a repository/environment
+variable, or an AWS lookup.
 
 ---
 
-## ECS
+## EKS Deployment
 
-Deploy the intended immutable image version to ECS.
+Deploy the landing page to the EKS cluster:
 
-ECS deployment must use the existing architecture:
+1. Configure kubeconfig with `aws eks update-kubeconfig` using the cluster name
+   and region (the OIDC role has `eks:DescribeCluster`).
+2. Apply the manifests in `k8s/` and set the Deployment image to the exact
+   commit-SHA tag just pushed.
+3. Deploy into the application namespace; do not use cluster-wide admin.
 
-- ECS Fargate
-- private subnets
-- no public IP assignment
-- internal ALB
-- existing ECS service and task-definition architecture
+### How the runner reaches the EKS API
 
-The CI/CD pipeline must not make architectural changes merely to simplify deployment.
+GitHub-hosted runners are outside the VPC, so the cluster's API endpoint must be
+reachable from the runner — normally via the EKS **public endpoint** (restrict
+`public_access_cidrs` where practical). A private-only endpoint would require a
+self-hosted runner inside the VPC. Document the chosen mode.
 
-Deployment failures must fail the pipeline.
+### Kubernetes permissions
 
-Do not silently continue after an unsuccessful ECS deployment.
+An EKS access entry alone grants no Kubernetes permissions. The `cicd` module
+must also associate an EKS access policy or bind Kubernetes RBAC
+(`Role`/`RoleBinding`) for the OIDC role, scoped to the application namespace
+where practical. The workflow deploys only within that namespace.
+
+Deployment failures must fail the pipeline. Do not silently continue after an
+unsuccessful deployment.
 
 ---
 
 ## Deployment Verification
 
-After an ECS deployment, verify that the deployment reaches a healthy state.
+After deploying, verify the rollout reaches a healthy state:
 
-Verification should confirm appropriate signals such as:
+- `kubectl rollout status deployment/<name> -n <namespace>` succeeds
+- the desired number of replicas (2) are Ready
+- failed/crash-looping pods are detected and fail the pipeline
 
-- ECS service deployment status
-- desired tasks are running
-- failed tasks are detected
-- ALB target health where applicable
-
-Application-level verification may be added where appropriate.
-
-For the current architecture, public application verification should use the intended CloudFront entry point rather than exposing the internal ALB or ECS tasks publicly.
+Public application verification is out of scope initially: access is via
+`kubectl port-forward`, not a public endpoint.
 
 ---
 
-## Failure Handling
+## Credentials
 
-Do not silently ignore failures.
+Never hardcode AWS credentials in workflows, Terraform, Dockerfiles, or
+application source. Prefer:
 
-Failures in required stages such as:
+- GitHub OIDC federation for AWS access (no stored keys)
+- GitHub Actions secrets only for non-AWS values that must be stored
+- AWS Secrets Manager / SSM for application secrets if ever needed
 
-- application tests
-- Terraform formatting
-- Terraform initialization
-- Terraform validation
-- Terraform plan
-- Docker build
-- ECR authentication
-- ECR push
-- ECS deployment
-- deployment verification
-
-must stop the appropriate pipeline execution.
-
-Do not use failure-suppression patterns solely to force a pipeline to appear successful.
-
-Log enough information to diagnose failures without exposing secrets.
+Use least-privilege permissions for the GitHub Actions role. Do not grant it
+`AdministratorAccess`. Do not expose credentials or secret values in workflow
+logs.
 
 ---
 
 ## Infrastructure vs Application Deployment
 
-Treat infrastructure changes and application releases as related but distinct concerns.
+Treat infrastructure changes and application releases as related but distinct
+concerns.
 
-Terraform manages AWS infrastructure.
+- Terraform manages AWS infrastructure (VPC, ECR, EKS, OIDC/IAM). Run Terraform
+  quality checks in CI where useful:
 
-The application deployment workflow builds an immutable container image, pushes it to ECR, and deploys the intended image version to ECS.
+  ```bash
+  terraform fmt -check -recursive
+  terraform init
+  terraform validate
+  terraform plan
+  ```
 
-Do not run `terraform apply` for every application release unless the architecture explicitly requires Terraform to manage that deployment action.
+  Formatting, init, validation, or plan failures must fail that job.
 
-Do not modify infrastructure merely to deploy a new application image.
+- The application release workflow builds the image, pushes it to ECR, and rolls
+  it out to EKS.
+
+Do not run `terraform apply` automatically merely because `terraform plan`
+succeeds. Infrastructure changes require an intentional control. Do not modify
+infrastructure merely to deploy a new application image.
+
+---
+
+## Failure Handling
+
+Do not silently ignore failures. These must stop the relevant workflow:
+
+- application build/lint failure
+- Docker build or image smoke-test failure
+- AWS authentication failure
+- ECR push failure
+- EKS deployment failure
+- rollout verification failure
+- Terraform fmt/init/validate/plan failure
+
+Do not use failure-suppression patterns to force a workflow to appear
+successful. Log enough to diagnose failures without exposing secrets.
 
 ---
 
 ## Environment Guidance
 
-### Development
+### Development (current)
 
-Current CI/CD automation targets only:
-
-`ecs-terraform/envs/dev`
-
-DEV should remain simple, secure, and cost-conscious.
-
-Infrastructure changes should be reviewed through Terraform plan before intentional application.
-
-Application deployments may be automated after required tests and checks succeed.
+CI/CD automation targets only `eks-terraform/envs/dev` and the dev EKS cluster.
+Keep it simple, secure, and cost-conscious. Infrastructure changes are reviewed
+through `terraform plan` before an intentional apply. Application deployments may
+be automated after required build and smoke-test stages succeed.
 
 ### Staging and Production
 
-Do not create staging or production pipelines unless explicitly requested.
-
-When those environments are introduced, evaluate additional controls such as:
-
-- manual approval gates
-- protected branches
-- environment-specific credentials and IAM roles
-- stronger test requirements
-- deployment health checks
-- rollback strategies
-- change-management requirements
-- infrastructure approval controls
-- production monitoring and alerting
-
-Do not assume DEV deployment controls automatically apply to staging or production.
+Do not create staging or production pipelines unless explicitly requested. When
+introduced, evaluate stronger controls (manual approval gates, protected
+branches, environment-specific roles, private endpoints, rollback strategies).
+Do not assume DEV controls automatically apply.

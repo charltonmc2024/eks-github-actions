@@ -4,7 +4,7 @@
 
 The only deployment root currently being implemented is:
 
-`ecs-terraform/envs/dev/`
+`eks-terraform/envs/dev/`
 
 Do not create:
 
@@ -13,9 +13,11 @@ Do not create:
 
 unless explicitly requested.
 
-Reusable modules should remain environment-independent where practical so future environments can consume them without redesigning the core module architecture.
+Reusable modules should remain environment-independent where practical so future
+environments can consume them without redesigning the core module architecture.
 
-Do not create speculative staging or production resources for future compatibility.
+Do not create speculative staging or production resources for future
+compatibility.
 
 ---
 
@@ -23,17 +25,18 @@ Do not create speculative staging or production resources for future compatibili
 
 Reusable infrastructure:
 
-`ecs-terraform/modules/`
+`eks-terraform/modules/`
 
 Current root module:
 
-`ecs-terraform/envs/dev/`
+`eks-terraform/envs/dev/`
 
 Remote-state bootstrap:
 
-`ecs-terraform/bootstrap/`
+`eks-terraform/bootstrap/`
 
-The root environment composes reusable modules and provides environment-specific configuration.
+The root environment composes reusable modules and provides environment-specific
+configuration.
 
 ---
 
@@ -42,13 +45,12 @@ The root environment composes reusable modules and provides environment-specific
 Current modules:
 
 - network
-- data
-- backend
-- edge
+- ecr
+- eks
 - cicd
-- observability
 
-Modules must remain reusable and should not contain unnecessary development-specific configuration.
+Modules must remain reusable and should not contain unnecessary
+development-specific configuration.
 
 Keep resources within the module that owns their architectural responsibility.
 
@@ -56,9 +58,11 @@ Use module outputs and input variables to pass required values between modules.
 
 Avoid circular module dependencies.
 
-Follow the dependency direction established in `architecture.md`.
+Follow the dependency direction established in `architecture.md`
+(`network -> eks`; `ecr` independent; `cicd` consumes ECR and EKS identifiers).
 
-Do not move resources between modules without a clear architectural reason and consideration of Terraform state impact.
+Do not move resources between modules without a clear architectural reason and
+consideration of Terraform state impact.
 
 ---
 
@@ -72,9 +76,9 @@ Do not hardcode:
 - subnet IDs
 - route table IDs
 - security group IDs
-- ECR URLs
-- CloudFront distribution IDs
-- hosted zone IDs
+- ECR repository URLs
+- EKS cluster names, endpoints, or certificate authority data
+- OIDC provider ARNs
 - generated AWS resource identifiers
 
 Use:
@@ -85,7 +89,9 @@ Use:
 - data sources
 - module outputs
 
-Static architectural configuration values may be used when intentional and not generated account-specific identifiers.
+Static architectural configuration values may be used when intentional and not
+generated account-specific identifiers. The GitHub repository identifier used in
+the OIDC trust policy is a legitimate configuration variable, not a secret.
 
 ---
 
@@ -100,7 +106,7 @@ Variables should:
 
 Development-specific values belong primarily in:
 
-`envs/dev/terraform.tfvars`
+`eks-terraform/envs/dev/terraform.tfvars`
 
 Do not put secrets in committed `terraform.tfvars`.
 
@@ -112,7 +118,8 @@ Mark sensitive Terraform variables as `sensitive = true` where appropriate.
 
 ## Outputs
 
-Modules should expose only values required by another module, the root module, CI/CD, or operators.
+Modules should expose only values required by another module, the root module,
+CI/CD, or operators.
 
 Do not create outputs merely because a resource has an ID or ARN.
 
@@ -121,18 +128,17 @@ Examples, when required by downstream consumers:
 - `vpc_id`
 - `public_subnet_ids`
 - `private_subnet_ids`
-- `alb_arn`
-- `alb_dns_name`
 - `ecr_repository_url`
-- `ecs_cluster_name`
-- `ecs_service_name`
-- `dynamodb_table_name`
-- `dynamodb_table_arn`
-- `cloudfront_distribution_id`
-- `cloudfront_domain_name`
-- `frontend_bucket_name`
+- `ecr_repository_arn`
+- `eks_cluster_name`
+- `eks_cluster_endpoint`
+- `eks_cluster_certificate_authority_data`
+- `eks_cluster_oidc_issuer_url`
+- `node_group_name`
+- `github_actions_role_arn`
 
-Do not expose secret values through Terraform outputs unless explicitly required and appropriately marked sensitive.
+Do not expose secret values through Terraform outputs unless explicitly required
+and appropriately marked sensitive.
 
 ---
 
@@ -142,7 +148,7 @@ Use locals for derived names.
 
 Preferred pattern:
 
-```hcl id="d3azuh"
+```hcl
 locals {
   name_prefix = "${var.app_name}-${var.environment}"
 }
@@ -152,7 +158,8 @@ Derive resource names from `local.name_prefix` where appropriate.
 
 Avoid repeating naming logic across resources.
 
-Respect AWS service-specific naming restrictions.
+Respect AWS service-specific naming restrictions (for example, EKS cluster and
+node group name constraints).
 
 ---
 
@@ -169,7 +176,8 @@ Recommended:
 
 Pass common tags from the root environment to reusable modules where practical.
 
-Merge common tags with resource-specific tags rather than duplicating tag definitions throughout the configuration.
+Merge common tags with resource-specific tags rather than duplicating tag
+definitions throughout the configuration.
 
 ---
 
@@ -194,7 +202,8 @@ Never commit:
 
 Do not manually edit Terraform state files.
 
-Do not delete or recreate Terraform-managed resources solely to resolve configuration issues without first considering Terraform state impact.
+Do not delete or recreate Terraform-managed resources solely to resolve
+configuration issues without first considering Terraform state impact.
 
 ---
 
@@ -202,11 +211,13 @@ Do not delete or recreate Terraform-managed resources solely to resolve configur
 
 The environment backend configuration belongs under:
 
-`envs/dev/`
+`eks-terraform/envs/dev/`
 
-Do not attempt to create the backend S3 bucket from the same Terraform state that depends on that backend.
+Do not attempt to create the backend S3 bucket from the same Terraform state
+that depends on that backend.
 
-Bootstrap the remote-state infrastructure separately before initializing the main DEV root.
+Bootstrap the remote-state infrastructure separately before initializing the
+main DEV root.
 
 Do not place a `backend` block inside reusable child modules.
 
@@ -214,26 +225,25 @@ Do not place a `backend` block inside reusable child modules.
 
 ## Providers
 
-Configure AWS providers in the root environment:
+Configure the AWS provider in the root environment:
 
-`envs/dev/providers.tf`
+`eks-terraform/envs/dev/providers.tf`
 
-Provider aliases should also be defined there.
+Define any provider aliases there as well.
 
-Examples:
-
-- default AWS provider/region
-- `aws.us_east_1` when required for CloudFront custom-domain ACM certificates
-
-Child modules should inherit the default provider configuration or receive provider aliases explicitly when required.
+Child modules should inherit the default provider configuration or receive
+provider aliases explicitly when required.
 
 Do not define unnecessary provider blocks inside reusable child modules.
 
-Do not place AWS credentials inside provider configuration.
+Do not place AWS credentials inside provider configuration. Use the established
+AWS authentication mechanism outside Terraform configuration.
 
-Use the established AWS authentication mechanism outside Terraform configuration.
-
-For the current DEV CloudFront default-domain configuration, a custom ACM certificate is not required. The `aws.us_east_1` alias may remain available for future custom-domain requirements without creating ACM resources now.
+If a Kubernetes or Helm provider is used (for example to apply manifests from
+Terraform), configure it in the root module using the EKS module outputs
+(endpoint, CA data, and a token/exec auth). In this project, however,
+Kubernetes manifests are normally applied by the GitHub Actions workflow with
+`kubectl`, not by Terraform.
 
 ---
 
@@ -241,22 +251,16 @@ For the current DEV CloudFront default-domain configuration, a custom ACM certif
 
 Follow the architecture defined in `architecture.md`.
 
-For the current application path, preserve the dependency direction:
+For the current path, preserve the dependency direction:
 
-```text id="h5ct45"
-network/data → backend → edge
+```text
+network -> eks
+ecr (independent)
+cicd consumes ECR and EKS identifiers
 ```
 
-Backend owns the internal ALB and ECS resources.
-
-Backend exposes the required ALB interface values:
-
-- `alb_arn`
-- `alb_dns_name`
-
-Edge consumes those outputs and owns the CloudFront VPC Origin.
-
-Backend must not depend on edge.
+The `cicd` module consumes the ECR repository identifier and the EKS cluster
+identifiers to build the GitHub OIDC role and the scoped EKS access entry.
 
 Do not introduce circular module dependencies.
 
@@ -266,19 +270,19 @@ Do not introduce circular module dependencies.
 
 Before committing:
 
-```bash id="j05ufr"
+```bash
 terraform fmt -recursive
 ```
 
 CI/CD may verify formatting using:
 
-```bash id="vprsyk"
+```bash
 terraform fmt -check -recursive
 ```
 
 Before planning or applying infrastructure:
 
-```bash id="3g9d7r"
+```bash
 terraform init
 terraform validate
 terraform plan
@@ -286,13 +290,15 @@ terraform plan
 
 Review the plan before:
 
-```bash id="k6ox2x"
+```bash
 terraform apply
 ```
 
-A successful `terraform plan` does not automatically authorize `terraform apply`.
+A successful `terraform plan` does not automatically authorize `terraform
+apply`.
 
-Do not run `terraform apply` when a specification or implementation task explicitly stops at validation or planning.
+Do not run `terraform apply` when a specification or implementation task
+explicitly stops at validation or planning.
 
 Investigate unexpected changes, replacements, or destroys before applying.
 
@@ -304,47 +310,57 @@ Before applying infrastructure changes, review the Terraform plan for:
 
 - unexpected resource destruction
 - unexpected resource replacement
-- unintended public resources
+- unintended public resources (for example an unintentionally public EKS
+  endpoint or public-IP nodes)
 - security group changes
-- IAM permission changes
+- IAM permission changes (especially the GitHub OIDC role trust policy and
+  permissions)
 - state inconsistencies
 - duplicate resources
-- unexpected recurring-cost resources
+- unexpected recurring-cost resources (NAT gateways, interface endpoints,
+  oversized nodes)
 - hardcoded identifiers
 - resources outside the current DEV scope
 
-For clean-slate work where no infrastructure exists in the active state, the expected plan should normally contain resources to add with no unexpected changes or destroys.
+For clean-slate work where no infrastructure exists in the active state, the
+expected plan should normally contain resources to add with no unexpected
+changes or destroys.
 
-Do not force a plan to match an expected count without investigating differences.
+Do not force a plan to match an expected count without investigating
+differences.
 
 ---
 
 ## Clean-Slate Refactoring
 
-The current modular architecture is a clean-slate implementation.
+The current modular architecture is a clean-slate implementation targeting EKS
+and GitHub Actions.
 
-Previous application infrastructure was intentionally removed, and legacy Terraform files may remain in the repository temporarily for reference.
-
-Do not create `moved` blocks or perform Terraform state migration for legacy application resources unless explicitly requested.
+Previous ECS/Jenkins application infrastructure was intentionally superseded.
+Legacy ECS-oriented Terraform files and the archived ECS specs may remain in the
+repository for reference, but they are not the implementation source.
 
 The current Terraform source of truth is:
 
-- `ecs-terraform/modules/`
-- `ecs-terraform/envs/dev/`
+- `eks-terraform/modules/` (network, ecr, eks, cicd)
+- `eks-terraform/envs/dev/`
 
-Legacy Terraform files outside these locations are reference-only.
+Do not create `moved` blocks or perform Terraform state migration for legacy
+ECS resources unless explicitly requested.
 
-Do not modify, import, migrate, or use legacy Terraform resources as the implementation source unless explicitly requested.
+Do not modify, import, migrate, or use legacy ECS Terraform resources as the
+implementation source unless explicitly requested.
 
-Before deployment, verify that the active remote state does not contain stale records for previously deleted application resources.
-
-If stale state is discovered, stop and review the state before changing, removing, importing, or recreating resources.
+Before deployment, verify that the active remote state does not contain stale
+records for previously deleted resources. If stale state is discovered, stop and
+review the state before changing, removing, importing, or recreating resources.
 
 ---
 
 ## Environment Independence
 
-Reusable modules should not assume DEV-specific values unless those values are intentionally provided through variables.
+Reusable modules should not assume DEV-specific values unless those values are
+intentionally provided through variables.
 
 Environment-specific configuration should normally be supplied by:
 
@@ -353,19 +369,9 @@ Environment-specific configuration should normally be supplied by:
 - provider configuration
 - module inputs
 
-Future staging and production environments may use different:
-
-- resource sizing
-- domains
-- certificates
-- scaling settings
-- backup policies
-- security controls
-- monitoring
-- retention periods
-- availability requirements
-
-Do not assume DEV defaults automatically apply to future environments.
+Future environments may use different node sizing, scaling, endpoint access
+modes, and security controls. Do not assume DEV defaults automatically apply to
+future environments.
 
 ---
 
@@ -386,15 +392,23 @@ When implementing an approved specification, follow:
 3. `tasks.md`
 4. project steering files
 
-If these documents conflict, identify and resolve the conflict before making a significant, destructive, or state-affecting infrastructure change.
+If these documents conflict, identify and resolve the conflict before making a
+significant, destructive, or state-affecting infrastructure change.
 
 ---
 
 ## Cost Awareness
 
-Prefer cost-conscious infrastructure for DEV.
+Prefer cost-conscious infrastructure for DEV. Verify current regional pricing
+before quoting figures; recorded reference figures and their date live in
+`conventions.md`.
 
-Do not create unnecessary:
+Treat these as deliberate, documented choices rather than defaults:
 
-- NAT Gateways
-- VPC
+- NAT gateway vs VPC endpoints vs public-subnet nodes (a NAT gateway is a
+  design choice, not a mandatory EKS charge)
+- single NAT gateway vs one per AZ
+- node instance size and desired count
+- ECR lifecycle policy to limit image storage
+- EKS control-plane cost is unavoidable while the cluster exists; document how
+  to tear the environment down when not learning

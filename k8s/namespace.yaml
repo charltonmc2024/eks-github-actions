@@ -1,0 +1,8 @@
+# Dedicated namespace for the landing page, so RBAC and the CI/CD role can be
+# scoped to it rather than using the default namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: erudition
+  labels:
+    app.kubernetes.io/part-of: erudition

@@ -1,0 +1,117 @@
+# Landing-page Deployment: two replicas of the Next.js standalone image.
+#
+# The image is a PLACEHOLDER that CI replaces with the exact ECR URL + commit-SHA
+# tag before applying (e.g. kubectl set image / kustomize). It is intentionally
+# not a floating "latest" so the deployed version is traceable. Until automated
+# deploy is wired, set it locally, e.g.:
+#   kubectl -n erudition set image deploy/erudition-landing \
+#     app=<account>.dkr.ecr.<region>.amazonaws.com/erudition-eks-dev-landing:<sha>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: erudition-landing
+  namespace: erudition
+  labels:
+    app.kubernetes.io/name: erudition-landing
+    app.kubernetes.io/part-of: erudition
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erudition-landing
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Surge one extra pod, never drop below one ready pod, so the page stays
+      # available during a rollout even on a single node.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erudition-landing
+        app.kubernetes.io/part-of: erudition
+    spec:
+      # Pod-level security context aligned with the Dockerfile (non-root uid/gid
+      # 1001, runs as the "nextjs" user). seccomp uses the runtime default.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread the two replicas across nodes when more than one node exists; a
+      # single node still schedules both (soft preference, not required).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: erudition-landing
+      containers:
+        - name: app
+          # Replaced by CI with <ecr_repository_url>:<git-sha>.
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          # Writable scratch dirs so readOnlyRootFilesystem can stay true. Next.js
+          # standalone may write a runtime cache under .next/cache and temp files
+          # under /tmp; everything else stays read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: next-cache
+              mountPath: /app/.next/cache
+          # Container-level hardening: no privilege escalation, drop all Linux
+          # capabilities, read-only root FS (Next.js standalone serves from the
+          # image and writes nothing at runtime).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # startupProbe gives the Next.js server time to come up before the
+          # liveness probe starts judging it; prevents premature restarts on slow
+          # starts (up to ~30 x 2s = 60s).
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          # readinessProbe gates Service endpoints: a pod only receives traffic
+          # once "/" returns success.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # livenessProbe restarts a wedged pod.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: next-cache
+          emptyDir: {}

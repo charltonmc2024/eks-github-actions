@@ -1,6 +1,6 @@
 ---
 name: aws-security-review
-description: Review the Erudition Solution development AWS infrastructure for least privilege, private networking, encryption, secrets handling, logging, and unintended public exposure.
+description: Review the Erudition landing-page EKS development infrastructure for least privilege, GitHub OIDC trust, private networking, EKS access scoping, secrets handling, encryption, and unintended public exposure.
 ---
 
 # AWS Security Review Skill
@@ -9,202 +9,101 @@ description: Review the Erudition Solution development AWS infrastructure for le
 
 Review Terraform and AWS architecture for security problems before deployment.
 
-Current environment:
+Current environment: `eks-terraform/envs/dev`. Scope: the Erudition landing page
+on Amazon EKS with GitHub Actions CI/CD. Security stays practical and
+cost-conscious for a learning environment but never sacrifices the core rules.
 
-`envs/dev`
-
-Security should remain practical and cost-conscious for development.
+Out of scope: ECS, DynamoDB, S3 frontend, CloudFront, Route 53, ACM.
 
 ## Review Areas
 
-Review:
+1. IAM and GitHub OIDC
+2. EKS cluster endpoint access
+3. EKS authorization (access entries + policy/RBAC)
+4. Networking and node connectivity
+5. Security groups
+6. ECR and container images
+7. Secrets
+8. Encryption
+9. Logging / retention
 
-1. IAM
-2. Networking
-3. Security groups
-4. S3
-5. CloudFront
-6. ECS
-7. DynamoDB
-8. Secrets
-9. Encryption
-10. Logging
-11. WAF
-12. CI/CD credentials
+## IAM and GitHub OIDC
 
-## IAM
+Check for least privilege. Flag `AdministratorAccess`, unnecessary `*` actions
+or resources, long-lived IAM users, and embedded credentials. Prefer IAM roles.
 
-Check for least privilege.
+Separate roles: EKS cluster role, EKS node role, GitHub Actions role.
 
-Flag:
+For the GitHub Actions OIDC role specifically, flag:
 
-- AdministratorAccess
-- unnecessary `*` actions
-- unnecessary `*` resources
-- long-lived IAM users
-- embedded credentials
+- a trust policy that does not restrict the `sub` claim to the specific
+  repository (and branch/environment where practical) — a wildcard repo is a
+  Critical finding
+- permissions broader than ECR auth/push/pull and `eks:DescribeCluster`
+- any stored AWS access keys used instead of OIDC federation
 
-Prefer IAM roles.
+## EKS Endpoint Access
 
-Separate:
+Expected flow:
 
-- ECS execution role
-- ECS task role
-- Jenkins role
+```text
+GitHub Actions runner --OIDC/IAM--> EKS API endpoint
+Developer --kubectl port-forward--> ClusterIP Service --> pods
+```
 
-where responsibilities differ.
+Check the cluster endpoint access mode. A fully public endpoint with no
+`public_access_cidrs` restriction is a finding (prefer restricting the CIDRs, or
+public+private). Private-only requires a self-hosted runner inside the VPC.
 
-## Networking
+## EKS Authorization
 
-Expected application architecture:
+An **EKS access entry alone grants no Kubernetes permissions**. Flag any access
+entry that is not paired with an access policy association or Kubernetes RBAC.
+Prefer permissions scoped to the application namespace over cluster-wide admin
+for the GitHub Actions role.
 
-Internet
-   |
-CloudFront
-   |
-VPC Origin
-   |
-Internal ALB
-   |
-ECS Fargate
+## Networking and Node Connectivity
 
-ECS should run in private subnets.
-
-ECS tasks should normally use:
-
-`assign_public_ip = false`
+EKS nodes run in private subnets with `assign_public_ip = false`. Flag
+public-IP nodes. Confirm the outbound connectivity choice is deliberate (single
+NAT gateway, VPC endpoints, etc.) and note its cost — a NAT gateway is a design
+choice, not a mandatory EKS cost.
 
 ## Security Groups
 
-Prefer security-group references.
+Prefer security-group references over wide CIDRs. There is no public ingress in
+this project (access is via port-forward); flag any unexpected `0.0.0.0/0`
+ingress.
 
-Expected relationship:
+## ECR and Container Images
 
-CloudFront/VPC Origin
-        |
-Internal ALB SG
-        |
-ECS SG
-
-Flag unnecessary:
-
-`0.0.0.0/0`
-
-rules.
-
-## S3
-
-Frontend S3 bucket should remain private.
-
-Check:
-
-- public access block
-- bucket policy
-- encryption
-- CloudFront Origin Access Control
-
-Do not make the bucket public simply to make CloudFront work.
-
-## CloudFront
-
-Check:
-
-- HTTPS
-- ACM certificate
-- HTTP-to-HTTPS redirect
-- correct origins
-- Origin Access Control
-- VPC Origin configuration
-
-AWS Shield Standard is automatically provided for supported services
-such as CloudFront.
-
-Do not create a Shield Standard Terraform resource.
-
-## ECS
-
-Check:
-
-- private subnets
-- no unnecessary public IP
-- correct security group
-- task execution role
-- task role
-- secrets injection
-- CloudWatch logging
-
-## DynamoDB
-
-Check:
-
-- encryption
-- Point-in-Time Recovery when required
-- access through IAM
-- unnecessary public-style access patterns
+Check: repository encryption at rest, a lifecycle policy to expire old/untagged
+images, immutable commit-SHA tags (not `latest` for deployment identity), and
+that the image runs as a non-root user.
 
 ## Secrets
 
-Never allow secrets in:
-
-- Git
-- Terraform source
-- Dockerfile
-- Jenkinsfile
-- committed tfvars
-
-Use:
-
-- Secrets Manager
-- SSM Parameter Store
-- Jenkins Credentials
+Never allow secrets in Git, Terraform source, Dockerfile, GitHub Actions
+workflows, or committed tfvars. Prefer GitHub OIDC (removes stored AWS keys),
+Secrets Manager / SSM for application secrets if ever needed. Note: the optional
+Twilio variables for the `api/support` route are intentionally not configured;
+their absence only disables SMS and does not expose a secret.
 
 ## Encryption
 
-Review encryption for:
-
-- S3
-- DynamoDB
-- backups
-- secrets
-- logs where appropriate
-
-Use KMS when requirements justify a customer-managed key.
+Review encryption for ECR, EKS secrets (envelope encryption with KMS where
+justified), and CloudWatch Logs. Use AWS-managed keys when sufficient; do not add
+customer-managed KMS speculatively.
 
 ## Logging
 
-Check:
-
-- CloudWatch log retention
-- CloudTrail
-- GuardDuty
-- AWS Config
-
-Avoid indefinite CloudWatch retention unless intentionally required.
-
-## WAF
-
-Review WAF configuration for CloudFront.
-
-Keep rules appropriate for the development environment.
-
-Avoid unnecessary paid rules or excessive complexity.
+Check CloudWatch log retention is finite (no indefinite retention). EKS
+control-plane log types each add cost — enable only what the learning goal needs.
+CloudTrail/GuardDuty/Config are out of scope unless explicitly requested.
 
 ## Security Report
 
-Classify findings as:
-
-Critical
-High
-Medium
-Low
-Informational
-
-For every issue explain:
-
-- what was found
-- why it matters
-- affected Terraform resource
-- recommended correction
-- potential cost impact
-
-Do not change architecture automatically for low-risk findings.
+Classify findings as Critical / High / Medium / Low / Informational. For each:
+what was found, why it matters, the affected Terraform resource, the recommended
+correction, and the potential cost impact. Do not change architecture
+automatically for low-risk findings.

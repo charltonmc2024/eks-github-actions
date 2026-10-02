@@ -1,0 +1,109 @@
+# Build, test, and push the Erudition landing-page image to Amazon ECR.
+#
+# Auth: GitHub OIDC -> assume the IAM role from the cicd Terraform module. No
+# stored AWS access keys. Images are tagged with the immutable Git commit SHA.
+#
+# DEPLOYMENT IS PENDING / NOT AUTOMATED HERE. The EKS public API endpoint is
+# restricted to the operator's /32, which GitHub-hosted runners cannot reach, so
+# this workflow stops after pushing to ECR. Deploy locally (see notes at end).
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "eks-application/**"
+      - ".github/workflows/build-and-push.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+# Repository/environment variables (GitHub repo settings, not secrets):
+#   AWS_ROLE_ARN       = module.cicd.github_actions_role_arn
+#   AWS_REGION         = us-east-1
+#   ECR_REPOSITORY_URL = module.ecr.ecr_repository_url
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY_URL: ${{ vars.ECR_REPOSITORY_URL }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eks-application
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: eks-application/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build (Next.js)
+        run: npm run build
+
+      - name: Build Docker image
+        run: docker build -t erudition-landing:${{ env.IMAGE_TAG }} .
+
+      - name: Smoke test the image
+        working-directory: .
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 3000:3000 erudition-landing:${IMAGE_TAG}
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/ >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs smoke || true
+          docker rm -f smoke
+          test "${ok:-0}" = "1" || { echo "smoke test failed"; exit 1; }
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image to ECR (immutable SHA tag; reuse if present)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          REPO="${ECR_REPOSITORY_URL}"
+          REPO_NAME="${REPO##*/}"
+          # IMMUTABLE repo: if this SHA tag already exists (rerun), reuse it.
+          if aws ecr describe-images --repository-name "$REPO_NAME" \
+               --image-ids imageTag="${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "Image ${REPO}:${IMAGE_TAG} already exists; reusing it."
+          else
+            docker tag erudition-landing:${IMAGE_TAG} "${REPO}:${IMAGE_TAG}"
+            docker push "${REPO}:${IMAGE_TAG}"
+          fi
+          echo "Pushed/validated image: ${REPO}:${IMAGE_TAG}"
+
+      # -------------------------------------------------------------------
+      # DEPLOYMENT: PENDING / NOT AUTOMATED.
+      # The EKS public endpoint is restricted to the operator's /32, which
+      # GitHub-hosted runners cannot reach, so this workflow stops after the
+      # ECR push. Deploy locally:
+      #   aws eks update-kubeconfig --name <cluster> --region us-east-1
+      #   kubectl apply -f k8s/
+      #   kubectl -n erudition set image deploy/erudition-landing app=<repo>:<sha>
+      #   kubectl -n erudition rollout status deploy/erudition-landing
+      # Automate later via a self-hosted runner inside the VPC (private endpoint).
+      # -------------------------------------------------------------------

@@ -1,6 +1,6 @@
 ---
 name: terraform-troubleshoot
-description: Diagnose Terraform, AWS provider, remote state, backend, module, and dependency problems in the Erudition Solution development environment.
+description: Diagnose Terraform, AWS provider, remote state, backend, module, EKS, ECR, and GitHub OIDC problems in the Erudition landing-page EKS development environment.
 ---
 
 # Terraform Troubleshooting Skill
@@ -10,162 +10,84 @@ description: Diagnose Terraform, AWS provider, remote state, backend, module, an
 Diagnose Terraform problems methodically without creating unnecessary
 infrastructure changes.
 
-Current environment:
-
-`ecs-terraform/envs/dev`
+Current environment: `eks-terraform/envs/dev` (modules: network, ecr, eks,
+cicd).
 
 ## First Rule
 
-Do not immediately:
-
-- delete Terraform state
-- delete the S3 state bucket
-- destroy infrastructure
-- remove `.terraform`
-- run `terraform destroy`
-- recreate AWS resources manually
-
-Understand the error first.
+Do not immediately: delete Terraform state, delete the S3 state bucket, destroy
+infrastructure, remove `.terraform`, run `terraform destroy`, or recreate AWS
+resources manually. Understand the error first.
 
 ## Troubleshooting Process
 
 1. Read the complete error.
 2. Identify the Terraform working directory.
 3. Identify the resource/module involved.
-4. Determine whether the problem is:
-   - syntax
-   - provider
-   - backend
-   - state
-   - dependency
-   - AWS permissions
-   - AWS API
-   - networking
-   - configuration
+4. Classify the problem: syntax, provider, backend, state, dependency, AWS
+   permissions, AWS API, networking, or configuration.
 5. Inspect the relevant Terraform files.
-6. Check Terraform state when necessary.
+6. Check Terraform state only when necessary.
 7. Make the smallest safe correction.
-8. Run validation.
-9. Run plan.
-10. Review the plan before applying.
+8. `terraform validate` -> `terraform plan` -> review before applying.
 
 ## Backend Problems
 
-The development environment uses remote state.
-
-Expected state key:
-
-`dev/terraform.tfstate`
-
-The bootstrap configuration creates the backend infrastructure.
-
-If Terraform reports that the backend bucket does not exist:
-
-- verify bootstrap infrastructure
-- verify backend configuration
-- verify AWS profile/account
-- verify AWS region
-
+The dev environment uses remote state (key `dev/terraform.tfstate`), created by
+the bootstrap configuration. If the backend bucket is reported missing: verify
+bootstrap infrastructure, backend configuration, AWS profile/account, and region.
 Do not create a second random backend bucket to bypass the problem.
 
 ## State Problems
 
-Useful commands may include:
-
-`terraform state list`
-
-`terraform state show`
-
-`terraform state mv`
-
-Use state modification commands carefully.
-
-Prefer Terraform `moved` blocks for code-based refactoring when appropriate.
-
-Never modify Terraform state blindly.
-
-## Module Refactoring
-
-When an existing resource moves from:
-
-`aws_resource.example`
-
-to:
-
-`module.example.aws_resource.example`
-
-Terraform may interpret this as:
-
-destroy old resource
-create new resource
-
-Preserve the state relationship before applying.
+Useful: `terraform state list`, `terraform state show`, `terraform state mv`.
+Use state modification carefully; prefer `moved` blocks for code-based
+refactors. Never modify state blindly.
 
 ## Provider Problems
 
-Check:
+Check Terraform version, AWS provider version, aliases, region, and AWS profile.
+Provider configuration belongs in `eks-terraform/envs/dev/providers.tf`. If a
+Kubernetes/Helm provider is configured against the cluster, verify its endpoint,
+CA data, and exec/token auth come from EKS module outputs.
 
-- Terraform version
-- AWS provider version
-- provider aliases
-- region
-- AWS profile
-- module provider mapping
+## EKS-Specific Issues
 
-Provider configuration belongs primarily in:
+- **Nodes not joining / NotReady:** check the node IAM role managed policies
+  (worker node, CNI, ECR read-only), subnet/route connectivity for image pulls
+  (NAT or VPC endpoints), and the cluster security group rules.
+- **`kubectl` unauthorized despite an access entry:** an access entry alone
+  grants no Kubernetes permissions — confirm an access policy association or an
+  RBAC `Role`/`RoleBinding` exists for the principal, scoped to the namespace.
+- **Runner cannot reach the API endpoint:** confirm the endpoint access mode
+  (public/public+private) and `public_access_cidrs`; a GitHub-hosted runner
+  needs the public path or a self-hosted runner in the VPC.
+- **Image pull failures (ECR):** check node role ECR permissions and outbound
+  connectivity to ECR (NAT or `ecr.api`/`ecr.dkr`/S3 endpoints).
 
-`envs/dev/providers.tf`
+## GitHub OIDC Issues
+
+- **`AssumeRoleWithWebIdentity` denied:** verify the OIDC provider thumbprint/
+  audience (`sts.amazonaws.com`) and that the trust policy `sub` condition
+  matches the exact repository and branch/environment.
+- Do not relax the trust policy to a wildcard to "fix" it — correct the specific
+  condition.
 
 ## AWS Authentication
 
-When authentication fails, verify the active identity.
+When authentication fails, verify the active identity (AWS CLI identity checks).
+Do not print or expose secret access keys. Never request that AWS secret keys be
+committed to source control.
 
-Use AWS CLI identity checks when appropriate.
+## Dependency / Lock / Duplicate Issues
 
-Do not print or expose secret access keys.
+Prefer Terraform references over manual `depends_on`; avoid circular module
+dependencies. For a state lock, confirm no legitimate operation holds it before
+force-unlocking. For "resource already exists", determine whether Terraform
+already manages it, it belongs to another state, or it needs importing — do not
+auto-delete existing resources.
 
-Never request that AWS secret keys be committed to source control.
+## Goal
 
-## Dependency Problems
-
-Prefer Terraform references over manual `depends_on`.
-
-Use `depends_on` only when Terraform cannot infer the dependency naturally.
-
-Avoid circular module dependencies.
-
-## Lock Problems
-
-If Terraform reports a state lock:
-
-- determine whether another Terraform operation is running
-- identify whether the lock is stale
-- do not force-unlock an active operation
-
-Use force unlock only after confirming that no legitimate Terraform
-process owns the lock.
-
-## Resource Already Exists
-
-Do not automatically delete an existing AWS resource.
-
-Determine whether:
-
-- Terraform already manages it
-- it belongs to another state
-- it needs importing
-- naming conflicts exist
-
-## Troubleshooting Goal
-
-The objective is not merely to remove the error.
-
-The objective is to restore Terraform to a predictable state where:
-
-`terraform validate`
-
-succeeds and:
-
-`terraform plan`
-
-shows the intended infrastructure changes only.
+Restore Terraform to a predictable state where `terraform validate` succeeds and
+`terraform plan` shows only the intended changes.
