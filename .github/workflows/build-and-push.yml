@@ -71,6 +71,30 @@ jobs:
           docker rm -f smoke
           test "${ok:-0}" = "1" || { echo "smoke test failed"; exit 1; }
 
+      - name: Inspect OIDC identity
+        working-directory: .
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += "&audience=sts.amazonaws.com"
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              token = json.load(response)["value"]
+
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          for key in ("sub", "aud", "repository", "ref"):
+              print(f"{key}: {claims.get(key)}")
+          PY
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
