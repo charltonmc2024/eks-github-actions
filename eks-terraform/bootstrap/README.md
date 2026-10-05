@@ -31,7 +31,7 @@ State locking is handled by S3 native locking (`use_lockfile = true` in
 ## Usage
 
 ```bash
-cd ecs-terraform/bootstrap
+cd eks-terraform/bootstrap
 
 # Uses the profile baked into the config (var.aws_profile), or override it
 terraform init
@@ -57,7 +57,7 @@ state_bucket_name = "eruditiontx-app-eks-dev-tfstate-<account_id>"
 ```
 
 Copy that value into the development root's backend config
-(`ecs-terraform/backend.config`, based on `backend.config.example`):
+(`eks-terraform/backend.config`, based on `backend.config.example`):
 
 ```hcl
 bucket       = "eruditiontx-app-eks-dev-tfstate-<account_id>"
