@@ -36,8 +36,9 @@ flowchart TD
       subgraph priv["Private subnets (2 AZs)"]
         subgraph eks["EKS cluster (public endpoint, /32-restricted)"]
           NG["Managed node group (t3.small)"]
-          DEP["Deployment: erudition-landing (2 replicas, :3000)"]
+          DEP["Deployment: erudition-landing (2 replicas)"]
           SVC["Service: erudition-landing (ClusterIP :80)"]
+          PODS["Pods: Next.js (:3000)"]
         end
       end
     end
@@ -47,8 +48,9 @@ flowchart TD
   NG -- "pull image" --> ECR
   NG -- "egress" --> NAT --> IGW
   KPF -- "svc 8080:80" --> SVC
-  SVC --> DEP
-  DEP --> NG
+  SVC -- "routes traffic" --> PODS
+  DEP -- "manages replicas" --> PODS
+  NG -- "hosts" --> PODS
 ```
 
 Dependency direction: `network → eks`; `ecr` is independent; `cicd` consumes the
