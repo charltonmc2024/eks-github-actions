@@ -20,10 +20,15 @@ permissions:
   id-token: write
   contents: read
 
-# Repository/environment variables (GitHub repo settings, not secrets):
-#   AWS_ROLE_ARN       = module.cicd.github_actions_role_arn
-#   AWS_REGION         = us-east-1
-#   ECR_REPOSITORY_URL = module.ecr.ecr_repository_url
+# GitHub repo configuration consumed below (set under Settings -> Secrets and
+# variables -> Actions). These match the `secrets.*` / `vars.*` references used
+# in this file:
+#   AWS_ROLE_ARN       (secret)   = module.cicd.github_actions_role_arn
+#   ECR_REPOSITORY_URL (secret)   = module.ecr.ecr_repository_url
+#   AWS_REGION         (variable) = us-east-1
+# The ARN and ECR URL are not inherently sensitive, but they are read from
+# secrets.* here, so configure them as repository secrets. AWS_REGION is read
+# from vars.*, so configure it as a repository variable.
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY_URL: ${{ secrets.ECR_REPOSITORY_URL }}

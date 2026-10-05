@@ -87,9 +87,9 @@ variable "ecr_max_tagged_images" {
 # Inputs for module "eks" (cluster + node group).
 
 variable "kubernetes_version" {
-  description = "Kubernetes minor version for the EKS control plane and node group (e.g. \"1.31\")."
+  description = "Kubernetes minor version for the EKS control plane and node group (e.g. \"1.35\")."
   type        = string
-  default     = "1.31"
+  default     = "1.35"
 }
 
 variable "admin_public_cidr" {

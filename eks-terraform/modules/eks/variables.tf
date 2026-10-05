@@ -22,9 +22,9 @@ variable "environment" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes minor version for the EKS control plane and node group (e.g. \"1.31\"). Keep on a supported (standard) version to avoid extended-support control-plane pricing."
+  description = "Kubernetes minor version for the EKS control plane and node group (e.g. \"1.35\"). Keep on a supported (standard) version to avoid extended-support control-plane pricing."
   type        = string
-  default     = "1.31"
+  default     = "1.35"
 
   validation {
     condition     = can(regex("^1\\.(2[5-9]|3[0-9])$", var.kubernetes_version))

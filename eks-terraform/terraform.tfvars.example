@@ -33,7 +33,7 @@ ecr_untagged_image_expiry_days = 7
 ecr_max_tagged_images = 10
 
 # EKS cluster + node group.
-kubernetes_version = "1.31"
+kubernetes_version = "1.35"
 
 # REQUIRED. Your current public IP as a /32 so local kubectl can reach the EKS
 # public API endpoint. Replace with your own IP; this is only a placeholder.

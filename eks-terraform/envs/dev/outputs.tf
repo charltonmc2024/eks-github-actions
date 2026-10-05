@@ -55,6 +55,6 @@ output "node_group_name" {
 }
 
 output "github_actions_role_arn" {
-  description = "IAM role ARN GitHub Actions assumes via OIDC (set as role-to-assume / repo variable)."
+  description = "IAM role ARN GitHub Actions assumes via OIDC. The workflow reads this as the AWS_ROLE_ARN GitHub repository secret (role-to-assume)."
   value       = module.cicd.github_actions_role_arn
 }

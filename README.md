@@ -247,13 +247,12 @@ kubectl -n erudition port-forward svc/erudition-landing 8080:80
 # open http://localhost:8080
 ```
 
-The `landing_page_url` Terraform output (`http://eruditionsys.com`) is an
-in-code local demo label, not a provisioned endpoint — nothing here configures
-DNS, an ALB/Ingress, or a public Service.
+There is no provisioned public endpoint — nothing here configures DNS, an
+ALB/Ingress, or a public Service.
 
 > **External setup (cannot be verified from this repository):** any Windows
-> `netsh portproxy` forwarding or hosts-file entry used to reach the
-> port-forwarded page lives on the operator's workstation, outside this repo.
+> `netsh portproxy` forwarding or hosts-file entry some operators use to reach
+> the port-forwarded page lives on the operator's workstation, outside this repo.
 
 ## Troubleshooting
 
