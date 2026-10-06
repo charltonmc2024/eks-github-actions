@@ -1,0 +1,53 @@
+# OPERATOR BOOTSTRAP — namespace-scoped RBAC for the GitHub Actions deploy role.
+#
+# Applied ONCE by the cluster-admin operator (NOT by the CI/CD workflow and NOT
+# by Terraform), via scripts/bootstrap-rbac.sh, which substitutes the deployer
+# group name from the Terraform output `eks_deployer_group` into the RoleBinding
+# subject below (the __EKS_DEPLOYER_GROUP__ placeholder).
+#
+# It grants the GitHub Actions role — authenticated by the EKS access entry into
+# the Kubernetes group `eks_deployer_group`
+# (e.g. erudition-eks-dev-erudition-deployers) — the LEAST-PRIVILEGE permissions
+# a landing-page rollout needs, scoped to the "erudition" namespace only:
+# deployments/replicasets (apps) and pods/services (core), with
+# get/list/watch/create/update/patch. No secrets, no serviceaccounts, no other
+# resources — this is deliberately narrower than AmazonEKSEditPolicy.
+#
+# Prerequisites:
+#   1. terraform apply created the EKS access entry mapping the role to the group.
+#   2. The "erudition" namespace exists (kubectl apply -f k8s/namespace.yaml).
+#
+# Do NOT apply this file directly: the RoleBinding subject contains a placeholder.
+# Run scripts/bootstrap-rbac.sh, which fills it in from the Terraform output.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: erudition-deployer
+  namespace: erudition
+  labels:
+    app.kubernetes.io/part-of: erudition
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: erudition-deployer
+  namespace: erudition
+  labels:
+    app.kubernetes.io/part-of: erudition
+subjects:
+  # Placeholder substituted by scripts/bootstrap-rbac.sh from the Terraform
+  # output `eks_deployer_group`. Do not hardcode a group name here.
+  - kind: Group
+    name: __EKS_DEPLOYER_GROUP__
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: erudition-deployer
+  apiGroup: rbac.authorization.k8s.io

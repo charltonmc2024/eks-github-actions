@@ -67,3 +67,38 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+# --- EKS deploy access (added for automated-eks-deployment) ---
+# These inputs drive the Terraform-managed EKS *access entry* for the GitHub
+# Actions role. The namespace-scoped Kubernetes *authorization* itself is granted
+# by a custom RBAC Role/RoleBinding created as an operator bootstrap step (see
+# the module README), NOT by an AmazonEKSEditPolicy association — this keeps the
+# role's in-namespace permissions least-privilege (deployments/replicasets/pods/
+# services only; no secrets, no serviceaccounts, no other resources).
+
+variable "eks_cluster_name" {
+  description = "Name of the EKS cluster (from the eks module) the GitHub Actions access entry is created on. Must not be empty."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.eks_cluster_name)) > 0
+    error_message = "eks_cluster_name must not be empty."
+  }
+}
+
+variable "create_eks_access" {
+  description = "Whether to create the EKS access entry for the GitHub Actions role (the namespace RBAC Role/RoleBinding that authorizes it is an operator bootstrap step). Set false to skip."
+  type        = bool
+  default     = true
+}
+
+variable "eks_application_namespace" {
+  description = "Kubernetes namespace the GitHub Actions role is permitted to deploy into (operator-created). Used to derive the Kubernetes group the access entry maps to and documented for the operator RBAC bootstrap."
+  type        = string
+  default     = "erudition"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.eks_application_namespace))
+    error_message = "eks_application_namespace must be a valid Kubernetes namespace name (DNS label)."
+  }
+}

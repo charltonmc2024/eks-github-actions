@@ -22,9 +22,13 @@ roles, and the operator access entry.
 - `endpoint_public_access = true`, restricted to `admin_public_cidr` (a /32) —
   only your IP reaches the public endpoint, so local `kubectl` works
 
-Standard GitHub-hosted runners cannot reach this restricted endpoint, so
-in-cluster deployment is performed locally (a self-hosted runner inside the VPC
-is the intended future path).
+Standard GitHub-hosted runners cannot reach the restricted public endpoint.
+The automated deploy job uses a self-hosted runner inside the VPC to reach
+the private API endpoint. Deployment authorization is configured through
+the cicd module's EKS access entry and operator-applied namespace RBAC.
+
+The deployment code is implemented and non-live validation is complete.
+Runner setup and live automated deployment verification remain pending.
 
 ## Inputs
 

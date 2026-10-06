@@ -96,6 +96,10 @@ module "cicd" {
 
   ecr_repository_arn = module.ecr.ecr_repository_arn
   eks_cluster_arn    = module.eks.eks_cluster_arn
+  # Cluster NAME (not ARN) for the GitHub Actions EKS access entry
+  # (automated-eks-deployment). eks_application_namespace and
+  # create_eks_access use the module defaults ("erudition" / true).
+  eks_cluster_name = module.eks.eks_cluster_name
 
   tags = {
     Project     = var.app_name

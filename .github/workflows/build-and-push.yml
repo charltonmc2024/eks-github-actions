@@ -1,11 +1,15 @@
-# Build, test, and push the Erudition landing-page image to Amazon ECR.
+# Build, test, and push the Erudition landing-page image to Amazon ECR, then
+# deploy it to the development EKS cluster.
 #
 # Auth: GitHub OIDC -> assume the IAM role from the cicd Terraform module. No
 # stored AWS access keys. Images are tagged with the immutable Git commit SHA.
 #
-# DEPLOYMENT IS PENDING / NOT AUTOMATED HERE. The EKS public API endpoint is
-# restricted to the operator's /32, which GitHub-hosted runners cannot reach, so
-# this workflow stops after pushing to ECR. Deploy locally (see notes at end).
+# Jobs:
+#   build-test-push : GitHub-hosted (ubuntu-latest). Build, smoke-test, push.
+#                     Behavior unchanged from the original pipeline.
+#   deploy          : SELF-HOSTED runner inside the VPC. Reaches the EKS PRIVATE
+#                     API endpoint, applies manifests, waits for rollout. Runs
+#                     ONLY from main (push or manual dispatch).
 name: build-and-push
 
 on:
@@ -13,22 +17,38 @@ on:
     branches: [main]
     paths:
       - "eks-application/**"
+      - "k8s/**"
       - ".github/workflows/build-and-push.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      deploy_sha:
+        description: "Git commit SHA to (re)deploy. Required when rollback=true; must already exist in ECR."
+        required: false
+        default: ""
+      rollback:
+        description: "Deliberate rollback to an older SHA. Skips the main-HEAD match check. Manual only."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
-  id-token: write
   contents: read
 
-# GitHub repo configuration consumed below (set under Settings -> Secrets and
-# variables -> Actions). These match the `secrets.*` / `vars.*` references used
-# in this file:
-#   AWS_ROLE_ARN       (secret)   = module.cicd.github_actions_role_arn
-#   ECR_REPOSITORY_URL (secret)   = module.ecr.ecr_repository_url
-#   AWS_REGION         (variable) = us-east-1
-# The ARN and ECR URL are not inherently sensitive, but they are read from
-# secrets.* here, so configure them as repository secrets. AWS_REGION is read
-# from vars.*, so configure it as a repository variable.
+# Serialize deploys to this environment. cancel-in-progress is FALSE on purpose:
+# cancelling an in-flight apply/rollout can leave a half-applied state.
+#
+# GitHub Actions concurrency semantics (do NOT assume otherwise): pending runs
+# in a group are NOT guaranteed to run in FIFO order, and when multiple runs
+# queue on the same group GitHub keeps only the most recently queued pending run
+# and cancels the rest -- so even the "newest" run is not guaranteed to complete.
+# Correctness does NOT rely on queue ordering; the deploy job's main-HEAD SHA
+# check is the real guard against deploying a stale commit. If a legitimate
+# deploy was skipped/cancelled by queueing, re-run it (see README
+# "Re-running a skipped deployment").
+concurrency:
+  group: deploy-erudition-eks-dev
+  cancel-in-progress: false
+
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY_URL: ${{ secrets.ECR_REPOSITORY_URL }}
@@ -37,6 +57,9 @@ env:
 jobs:
   build-test-push:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     defaults:
       run:
         working-directory: eks-application
@@ -115,7 +138,6 @@ jobs:
           set -euo pipefail
           REPO="${ECR_REPOSITORY_URL}"
           REPO_NAME="${REPO##*/}"
-          # IMMUTABLE repo: if this SHA tag already exists (rerun), reuse it.
           if aws ecr describe-images --repository-name "$REPO_NAME" \
                --image-ids imageTag="${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image ${REPO}:${IMAGE_TAG} already exists; reusing it."
@@ -125,14 +147,108 @@ jobs:
           fi
           echo "Pushed/validated image: ${REPO}:${IMAGE_TAG}"
 
-      # -------------------------------------------------------------------
-      # DEPLOYMENT: PENDING / NOT AUTOMATED.
-      # The EKS public endpoint is restricted to the operator's /32, which
-      # GitHub-hosted runners cannot reach, so this workflow stops after the
-      # ECR push. Deploy locally:
-      #   aws eks update-kubeconfig --name <cluster> --region us-east-1
-      #   kubectl apply -f k8s/
-      #   kubectl -n erudition set image deploy/erudition-landing app=<repo>:<sha>
-      #   kubectl -n erudition rollout status deploy/erudition-landing
-      # Automate later via a self-hosted runner inside the VPC (private endpoint).
-      # -------------------------------------------------------------------
+  deploy:
+    needs: build-test-push
+    runs-on: [self-hosted, linux, erudition-eks-dev]
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout current ref
+        uses: actions/checkout@v4
+
+      - name: Resolve and validate target SHA
+        id: target
+        env:
+          ROLLBACK_INPUT: ${{ github.event.inputs.rollback }}
+          DEPLOY_SHA_INPUT: ${{ github.event.inputs.deploy_sha }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          validate_sha() {
+            case "$1" in
+              ""|*[!0-9a-fA-F]*) return 1 ;;
+            esac
+            n=${#1}; [ "$n" -ge 7 ] && [ "$n" -le 40 ]
+          }
+
+          if [ "${ROLLBACK_INPUT:-false}" = "true" ]; then
+            if ! validate_sha "${DEPLOY_SHA_INPUT:-}"; then
+              echo "rollback=true requires a valid hex deploy_sha (7-40 hex chars); got '${DEPLOY_SHA_INPUT:-}'"; exit 1
+            fi
+            TARGET_SHA="$DEPLOY_SHA_INPUT"
+            echo "Rollback requested to $TARGET_SHA (main-HEAD check skipped)."
+          elif [ -n "${DEPLOY_SHA_INPUT:-}" ]; then
+            if ! validate_sha "$DEPLOY_SHA_INPUT"; then
+              echo "deploy_sha '$DEPLOY_SHA_INPUT' is not a valid hex Git SHA"; exit 1
+            fi
+            TARGET_SHA="$DEPLOY_SHA_INPUT"
+          else
+            TARGET_SHA="$PUSH_SHA"
+          fi
+
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "rollback=${ROLLBACK_INPUT:-false}" >> "$GITHUB_OUTPUT"
+
+      - name: Guard against stale deploy (main-HEAD match)
+        if: ${{ github.event.inputs.rollback != 'true' }}
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          MAIN_HEAD="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          if [ -z "$MAIN_HEAD" ]; then echo "Could not resolve main HEAD"; exit 1; fi
+          case "$MAIN_HEAD" in
+            "$TARGET_SHA"*) echo "Target $TARGET_SHA matches main HEAD $MAIN_HEAD." ;;
+            *) echo "Target $TARGET_SHA is not current main HEAD ($MAIN_HEAD); aborting stale deploy. Re-run for the current HEAD (see README)."; exit 1 ;;
+          esac
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to EKS and verify rollout
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          ROLLBACK: ${{ steps.target.outputs.rollback }}
+          CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+          APP_NAMESPACE: erudition
+        run: |
+          set -euo pipefail
+          REPO="${ECR_REPOSITORY_URL}"
+          REPO_NAME="${REPO##*/}"
+          IMAGE_URI="${REPO}:${TARGET_SHA}"
+
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+          if ! aws ecr describe-images --repository-name "$REPO_NAME" \
+                 --image-ids imageTag="$TARGET_SHA" >/dev/null 2>&1; then
+            echo "Image tag $TARGET_SHA not found in ECR ($REPO_NAME); cannot deploy."; exit 1
+          fi
+
+          if [ "$ROLLBACK" = "true" ]; then
+            kubectl -n "$APP_NAMESPACE" set image deploy/erudition-landing app="$IMAGE_URI"
+          else
+            sed "s#IMAGE_PLACEHOLDER#${IMAGE_URI}#g" k8s/deployment.yaml > /tmp/deployment.yaml
+            if grep -q IMAGE_PLACEHOLDER /tmp/deployment.yaml; then
+              echo "IMAGE_PLACEHOLDER was not substituted"; exit 1
+            fi
+            kubectl -n "$APP_NAMESPACE" apply -f /tmp/deployment.yaml
+            kubectl -n "$APP_NAMESPACE" apply -f k8s/service.yaml
+          fi
+
+          kubectl -n "$APP_NAMESPACE" annotate --overwrite deploy/erudition-landing \
+            app.kubernetes.io/version="$TARGET_SHA"
+
+          if ! kubectl -n "$APP_NAMESPACE" rollout status deploy/erudition-landing --timeout=300s; then
+            echo "Rollout failed or timed out; diagnostics:"
+            kubectl -n "$APP_NAMESPACE" get pods -o wide || true
+            kubectl -n "$APP_NAMESPACE" describe deploy/erudition-landing || true
+            exit 1
+          fi
+          echo "Deployed ${IMAGE_URI}; rollout completed."

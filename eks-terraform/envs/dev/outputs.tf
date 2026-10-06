@@ -58,3 +58,16 @@ output "github_actions_role_arn" {
   description = "IAM role ARN GitHub Actions assumes via OIDC. The workflow reads this as the AWS_ROLE_ARN GitHub repository secret (role-to-assume)."
   value       = module.cicd.github_actions_role_arn
 }
+
+# EKS deploy-access outputs (automated-eks-deployment). The operator needs the
+# deployer group name to bind the namespace-scoped RBAC RoleBinding
+# (k8s/rbac-deployer.yaml) to the GitHub Actions role.
+output "eks_deployer_group" {
+  description = "Kubernetes group the GitHub Actions role authenticates as; bind this group in k8s/rbac-deployer.yaml."
+  value       = module.cicd.eks_deployer_group
+}
+
+output "github_actions_eks_access_entry_principal_arn" {
+  description = "Principal ARN of the GitHub Actions EKS access entry (null when create_eks_access is false)."
+  value       = module.cicd.eks_access_entry_principal_arn
+}
