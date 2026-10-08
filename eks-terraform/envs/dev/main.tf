@@ -90,9 +90,11 @@ module "cicd" {
   app_name    = var.app_name
   environment = var.environment
 
-  github_owner  = var.github_owner
-  github_repo   = var.github_repo
-  github_branch = var.github_branch
+  github_owner    = var.github_owner
+  github_repo     = var.github_repo
+  github_branch   = var.github_branch
+  github_owner_id = "158232901"
+  github_repo_id  = "1402120083"
 
   ecr_repository_arn = module.ecr.ecr_repository_arn
   eks_cluster_arn    = module.eks.eks_cluster_arn

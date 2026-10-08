@@ -10,7 +10,7 @@ Only the landing page runs on EKS. There is a single **development** environment
 repository.
 
 This README demonstrates applied work in containerization, Kubernetes workload
-design, GitHub Actions CI, Terraform module architecture, AWS identity and
+design, GitHub Actions CI/CD, Terraform module architecture, AWS identity and
 access management (GitHub OIDC and EKS access entries), and deliberate cost
 control.
 
@@ -38,15 +38,16 @@ CI/CD responsibilities are split deliberately:
   endpoint, and waits for rollout completion. Operator bootstrap is
   required before the first run.
 
-**Validation status:** Implementation and non-live validation are
-complete. Live verification of the automated deployment is pending.
+**Validation status:** Live automated deployment through GitHub Actions was
+verified successfully on October 8, 2026. Both the build/push and EKS deployment
+jobs completed successfully.
 
 ## 2. Architecture and request flow
 
 ```mermaid
 flowchart TD
   subgraph dev["Developer workstation"]
-    KPF["kubectl port-forward: 8080 to 80"]
+    KPF["kubectl port-forward: 8081 to 80"]
     LOCAL["Local kubectl: operator bootstrap"]
   end
 
@@ -100,10 +101,10 @@ flowchart TD
 Request flow (viewing the page):
 
 1. The operator runs
-   `kubectl -n erudition port-forward svc/erudition-landing 8080:80`.
+   `kubectl -n erudition port-forward svc/erudition-landing 8081:80`.
 2. kubectl uses the Service selector to select a Pod and maps
    Service port 80 to the Pod's target port 3000.
-3. Traffic from localhost:8080 travels through the Kubernetes API
+3. Traffic from localhost:8081 travels through the Kubernetes API
    port-forward connection directly to that selected Pod.
 4. The Pod serves the Next.js landing page. This tunnel does not
    pass through the Service's ClusterIP or load-balance across Pods.
@@ -159,6 +160,7 @@ scripts/                 # Operator RBAC bootstrap script
 eks-terraform/
   bootstrap/             # Remote-state S3 bucket; uses local state
   envs/dev/              # Dev root composing the Terraform modules
+    runner.tf            # EC2 runner, SSM IAM role, and network rules
   modules/               # network, ecr, eks, cicd; see module READMEs
   archive/               # Legacy ECS modules; not used by the dev root
 ```
@@ -204,6 +206,13 @@ The dev root (`eks-terraform/envs/dev`) composes four reusable modules:
   mapping that role to the derived deployer group. Kubernetes permissions
   are granted separately by the custom namespace Role/RoleBinding,
   applied by the operator using `./scripts/bootstrap-rbac.sh`.
+
+The dev root also provisions the self-hosted runner through
+`eks-terraform/envs/dev/runner.tf`: a private `t3.small` EC2 instance,
+an encrypted 20 GB gp3 root volume, an SSM-only instance role/profile,
+a runner security group, outbound access, and TCP 443 access to the
+EKS cluster security group. IMDSv2 is required. The instance has no
+public IP and uses the existing NAT Gateway for outbound connectivity.
 
 Resource names derive from a `name_prefix` of `${app_name}-${environment}`
 (`erudition-eks-dev`). Account-specific identifiers are passed between modules
@@ -283,7 +292,7 @@ If a legitimate deploy was skipped or cancelled by queueing (or aborted by the
 HEAD guard because `main` had moved), re-run it against the current HEAD by any
 of:
 
-- pushing a new commit (or an empty commit) to `main`, or
+- pushing a commit to `main` that changes a workflow-matched path, or
 - using **Re-run jobs** on the latest `main` workflow run, or
 - triggering **Run workflow** (`workflow_dispatch`) on the `main` branch.
 
@@ -321,7 +330,7 @@ so the EKS module grants you cluster-admin.
 
 ```bash
 export AWS_PROFILE=your-profile
-aws sts get-caller-identity   # confirm the AWS account and active identity
+aws sts get-caller-identity   *# confirm the AWS account and active identity*
 ```
 
 **GitHub Actions.** The `cicd` module creates the GitHub OIDC provider
@@ -329,6 +338,19 @@ and an IAM role whose trust is scoped to the configured repository and
 branch. IAM permissions allow ECR authentication, push/pull scoped to
 the application repository, and `eks:DescribeCluster` scoped to the
 cluster ARN.
+
+The CI/CD module takes `github_owner_id` and `github_repo_id` in addition
+to the owner, repository, and branch names. The dev module call passes
+owner ID `158232901` and repository ID `1402120083`. For this repository,
+the trusted subject is:
+
+```text
+repo:charltonmc2024@158232901/eks-github-actions@1402120083:ref:refs/heads/main
+```
+
+The audience remains `sts.amazonaws.com`. Match the actual `sub` printed
+by the workflow's **Inspect OIDC identity** step; other repositories may
+use a different subject format.
 
 Kubernetes deployment authorization is configured separately: an EKS
 access entry maps the role to the deployer group, and a custom
@@ -368,7 +390,7 @@ terraform -chdir=eks-terraform/envs/dev init \
 terraform -chdir=eks-terraform fmt -check -recursive
 terraform -chdir=eks-terraform/envs/dev validate
 terraform -chdir=eks-terraform/envs/dev plan -out=dev.tfplan
-terraform -chdir=eks-terraform/envs/dev show dev.tfplan   # review before applying
+terraform -chdir=eks-terraform/envs/dev show dev.tfplan   *# review before applying*
 ```
 
 The dev state key is `eks-dev/terraform.tfstate`; the backend bucket, key, and
@@ -411,14 +433,14 @@ first run. These steps provision and authorize; they are not run by CI.
 
 1. **Provision infrastructure.** From the repository root, using
    `terraform -chdir=eks-terraform/envs/dev` throughout. This creates network,
-   ECR, EKS, and the `cicd` IAM role + EKS access entry. Review the saved plan,
+   ECR, EKS, the `cicd` IAM role + EKS access entry, and the runner EC2 resources. Review the saved plan,
    then apply **that exact plan**:
    ```bash
    terraform -chdir=eks-terraform/envs/dev init -backend-config=../../backend.config
    terraform -chdir=eks-terraform/envs/dev validate
    terraform -chdir=eks-terraform/envs/dev plan -out=dev.tfplan
-   terraform -chdir=eks-terraform/envs/dev show dev.tfplan   # review before applying
-   terraform -chdir=eks-terraform/envs/dev apply dev.tfplan  # applies the reviewed plan
+   terraform -chdir=eks-terraform/envs/dev show dev.tfplan   *# review before applying*
+   terraform -chdir=eks-terraform/envs/dev apply dev.tfplan  *# applies the reviewed plan*
    ```
 2. **Create the application namespace with operator access.** As the
    cluster-admin operator:
@@ -446,15 +468,58 @@ first run. These steps provision and authorize; they are not run by CI.
 4. **Configure GitHub secrets/variables and the self-hosted runner.**
    - Secrets/variables: `AWS_ROLE_ARN`, `ECR_REPOSITORY_URL` (secrets);
      `AWS_REGION`, `EKS_CLUSTER_NAME` (variables) — see section 6.
-   - Launch a small self-hosted runner in a **private** subnet (no public IP),
-     with a minimal instance profile (SSM only; no ECR/EKS permissions), and
-     register it at the **repository** level with labels
-     `self-hosted,linux,erudition-eks-dev`. Runner groups are an org/enterprise
-     feature and are unavailable on a personal-account repo; labels only select
-     the runner and are not an authorization boundary. The trust boundary is
-     repo-scoped registration + the `main`-only job guard + no `pull_request`
-     trigger (keep the repository private). Allow the runner security group to
-     reach the cluster security group on 443.
+   - Terraform provisions the private runner instance. Find it with:
+
+     ```bash
+     terraform -chdir=eks-terraform/envs/dev output -raw runner_instance_id
+     ```
+
+   - In AWS Console (us-east-1), select the instance under **EC2 → Instances**,
+     then **Connect → Session Manager**. Its instance profile has
+     `AmazonSSMManagedInstanceCore`; deployment permissions come from OIDC.
+   - Wait for bootstrap to finish (`sudo cloud-init status --wait`). Check
+     `git --version` and `aws --version`. Install AWS CLI v2 if absent and
+     install a checksum-verified `kubectl` compatible with Kubernetes 1.35
+     into `/usr/local/bin`. The deploy job needs no Docker installation.
+   - Prepare the directory and switch to the runner user:
+
+     ```bash
+     sudo mkdir -p /home/ec2-user/actions-runner
+     sudo chown ec2-user:ec2-user /home/ec2-user/actions-runner
+     sudo su - ec2-user
+     cd /home/ec2-user/actions-runner
+     ```
+
+   - In GitHub, open **Settings → Actions → Runners → New self-hosted runner**,
+     choose **Linux / x64**, and run the displayed download, checksum, and
+     extraction commands in the EC2 terminal. Skip creating another directory.
+   - Register the runner from that directory:
+
+     ```bash
+     ./config.sh \
+       --url https://github.com/charltonmc2024/eks-github-actions \
+       --name erudition-eks-dev-runner \
+       --labels erudition-eks-dev \
+       --work _work
+     ```
+
+     Enter the short-lived registration token from GitHub when prompted.
+     Accept the default runner group. Keep tokens out of source, Terraform
+     configuration/state, and shared logs. `svc.sh` appears after configuration.
+   - Install and start the service:
+
+     ```bash
+     sudo ./svc.sh install ec2-user
+     sudo ./svc.sh start
+     sudo ./svc.sh status
+     ```
+
+     Confirm the repository runner is **Idle** or **Active** and has the
+     `self-hosted`, `linux`, and `erudition-eks-dev` labels. Labels select a
+     runner; they are not an authorization boundary. Restrict repository and
+     workflow write access. The workflow deploys only from `main` and has no
+     `pull_request` trigger.
+
 5. **Run the workflow and verify the rollout.** Push to `main` (or run the
    workflow manually on `main`); then verify (section 8).
 
@@ -479,14 +544,14 @@ configures DNS, an ALB/Ingress, or a public Service. Reach the page through a
 port-forward tunnel:
 
 ```bash
-kubectl -n erudition port-forward svc/erudition-landing 8080:80
-# Open http://localhost:8080
+kubectl -n erudition port-forward svc/erudition-landing 8081:80
+# Open http://localhost:8081
 ```
 
 Verify the workload:
 
 ```bash
-kubectl -n erudition get pods -o wide  # expect two Running Pods, each READY 1/1
+kubectl -n erudition get pods -o wide  *# expect two Running Pods, each READY 1/1*
 kubectl -n erudition get deploy,svc
 kubectl -n erudition logs deploy/erudition-landing
 ```
@@ -549,9 +614,12 @@ verify current regional pricing before quoting any number.
 
 ### Cleanup
 
-Deregister the self-hosted runner from GitHub, terminate its EC2
-instance, and remove any retained runner EBS volumes. If provisioned
-separately, the runner is not removed by the dev Terraform destroy.
+Cancel queued workflows and stop the runner service before cleanup.
+Remove its registration under GitHub **Settings → Actions → Runners**.
+The dev Terraform destroy removes the runner EC2 instance, its root EBS
+volume (`delete_on_termination = true`), instance profile, IAM role and
+policy attachment, runner security group, and the added network rules.
+Do not terminate this Terraform-managed instance separately.
 
 ```bash
 # Optional; destroy removes the cluster anyway. Delete the app objects only
@@ -561,9 +629,11 @@ kubectl delete -f k8s/deployment.yaml -f k8s/service.yaml || true
 # The ECR repository has force_delete = false, so empty it before destroy:
 REPO_NAME=$(terraform -chdir=eks-terraform/envs/dev output -raw ecr_repository_url); REPO_NAME="${REPO_NAME##*/}"
 aws ecr list-images --repository-name "$REPO_NAME" --query 'imageIds[*]' --output json > /tmp/ids.json
-aws ecr batch-delete-image --repository-name "$REPO_NAME" --image-ids file:///tmp/ids.json
+if [ "$(python3 -c 'import json; print(len(json.load(open("/tmp/ids.json"))))')" -gt 0 ]; then
+  aws ecr batch-delete-image --repository-name "$REPO_NAME" --image-ids file:///tmp/ids.json
+fi
 
-terraform -chdir=eks-terraform/envs/dev destroy   # run from the repository root
+terraform -chdir=eks-terraform/envs/dev destroy   *# run from the repository root*
 ```
 
 Resources that remain after `terraform destroy`:
@@ -581,8 +651,9 @@ Current limitations (by design in this environment):
 
 - **Deployment requires a self-hosted runner.** The deploy job runs on a
   self-hosted runner inside the VPC because the restricted public EKS endpoint
-  is unreachable from GitHub-hosted runners; the operator must provision and
-  register that runner (see section 7).
+  is unreachable from GitHub-hosted runners. Terraform provisions the runner
+  infrastructure; tool installation and GitHub registration remain operator
+  steps and must be repeated after runner replacement (see section 7).
 - **No automated tests.** `package.json` defines `dev`, `build`, `start`, and
   `lint` only — there is no `test` script, and CI runs no application tests. The
   only automated check of the running image is the Docker smoke test.

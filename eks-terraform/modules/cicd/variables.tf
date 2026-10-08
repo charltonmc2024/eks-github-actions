@@ -40,6 +40,26 @@ variable "github_repo" {
   }
 }
 
+variable "github_owner_id" {
+  description = "GitHub repository owner's numeric ID."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must contain only digits."
+  }
+}
+
+variable "github_repo_id" {
+  description = "GitHub repository's numeric ID."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repo_id))
+    error_message = "github_repo_id must contain only digits."
+  }
+}
+
 variable "github_branch" {
   description = "Optional branch to further restrict the OIDC trust (e.g. \"main\"). Empty string allows any ref in the repo."
   type        = string
